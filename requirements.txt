@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pandas
+openpyxl
+numpy
+requests
+thefuzz
+psutil
+python-Levenshtein
+python-multipart
