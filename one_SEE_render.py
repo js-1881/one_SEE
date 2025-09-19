@@ -49,24 +49,26 @@ def is_number(val):
     except (ValueError, TypeError):
         return False
 
-
 # Endpoint to process the message text (from Slack)
 @app.post("/process")
 async def process_message(message: dict):
-    
+    # Extract text from the Slack message
     slack_text = message.get("text", "")
+
+    # Initialize valid_ids list within the function
+    valid_ids.clear()  # Clear the list to avoid accumulation from previous calls
 
     # Extract valid "SEE" IDs from the Slack message
     for word in slack_text.split():
         # Check if the word starts with 'SEE' (case-insensitive)
         if word.strip().lower().startswith("see"):
-            valid_ids.append(word.strip().upper())
-
-    valid_ids = []
+            valid_ids.append(word.strip().upper())  # Add to valid_ids (in uppercase)
 
     # Get unique 'SEE' IDs and count them
-    unique_see = list(set(valid_ids))
+    unique_see = list(set(valid_ids))  # Remove duplicates by converting to set, then back to list
     count = len(unique_see)
+
+    # Perform a RAM check (optional)
     ram_check()
 
 
@@ -222,7 +224,8 @@ async def process_message(message: dict):
 
     print(final_weighted_blindleister)
 
-    final_weighted_blindleister_string = final_weighted_blindleister.to_string(index=False)
+    data = final_weighted_blindleister.to_dict(orient='records')
+    return {"data": data}
 
 
     
