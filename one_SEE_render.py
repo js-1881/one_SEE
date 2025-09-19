@@ -49,6 +49,9 @@ def is_number(val):
     except (ValueError, TypeError):
         return False
 
+
+valid_ids = []
+
 # Endpoint to process the message text (from Slack)
 @app.post("/process")
 async def process_message(message: dict):
@@ -229,3 +232,4 @@ async def process_message(message: dict):
 
 
     
+
