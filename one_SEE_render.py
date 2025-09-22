@@ -189,7 +189,18 @@ async def process_message(message: dict):
         df_all_flat['monthly_energy_contribution_percent'] / 100 * 12
     )
 
+    df_all_flat['spot_rmv_EUR_ytd'] = (
+    ((df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_market_price_eur_mwh']) -
+        (df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_reference_market_price_eur_mwh']))
+    )
+    
+    permalo_blind = df_all_flat.groupby(['unit_mastr_id'], dropna=False).agg(
+                        spot_rmv_EUR_ytd = ('spot_rmv_EUR_ytd','sum'),
+                        sum_prod_ytd = ('monthly_generated_energy_mwh','sum')
+                    ).reset_index()
 
+    permalo_blind['average_weighted_eur_mwh_blindleister'] = permalo_blind['spot_rmv_EUR_ytd'] / permalo_blind['sum_prod_ytd']
+    
     print("🥨🥨🥨")
     ram_check()
 
@@ -227,9 +238,17 @@ async def process_message(message: dict):
         'weighted_2021_eur_mwh_blindleister',
         'weighted_2023_eur_mwh_blindleister',
         'weighted_2024_eur_mwh_blindleister',
-        'average_weighted_eur_mwh_blindleister'
+        #'average_weighted_eur_mwh_blindleister_avg'
     ]]
-
+    
+    
+    final_weighted_blindleister = pd.merge(
+        final_weighted_blindleister, 
+        permalo_blind[["unit_mastr_id", "average_weighted_eur_mwh_blindleister"]],
+        on= 'unit_mastr_id',
+        how='left'
+    )
+    
     print(final_weighted_blindleister)
 
     data = final_weighted_blindleister.to_dict(orient='records')
@@ -237,5 +256,6 @@ async def process_message(message: dict):
 
 
     
+
 
 
