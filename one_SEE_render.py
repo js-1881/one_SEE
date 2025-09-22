@@ -50,6 +50,11 @@ def is_number(val):
         return False
 
 
+@app.get("/health", include_in_schema=False)
+def health():
+    return {"ok": True}
+
+
 valid_ids = []
 
 # Endpoint to process the message text (from Slack)
@@ -232,4 +237,5 @@ async def process_message(message: dict):
 
 
     
+
 
