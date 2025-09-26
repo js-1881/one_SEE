@@ -16,7 +16,14 @@ from openpyxl import load_workbook
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio
+
 app = FastAPI()
+
+# Initialize the scheduler
+scheduler = AsyncIOScheduler()
+
 @app.get("/")
 async def root():
     return {
@@ -255,7 +262,25 @@ async def process_message(message: dict):
     return {"data": data}
 
 
-    
+# Function to ping the health endpoint every 13 minutes
+async def ping_health():
+    while True:
+        try:
+            response = requests.get("http://localhost:8000/health")
+            print(f"Health ping response: {response.status_code}")
+        except Exception as e:
+            print(f"Error pinging health: {e}")
+        await asyncio.sleep(780)  # Sleep for 13 minutes (780 seconds)
+
+# Start the pinging in the background
+@app.on_event("startup")
+async def start_ping_task():
+    # Start the ping task in the background when the application starts
+    asyncio.create_task(ping_health())
+
+# Start the scheduler to ping the health endpoint every 13 minutes periodically
+scheduler.start()    
+
 
 
 
