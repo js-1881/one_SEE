@@ -266,11 +266,13 @@ async def process_message(message: dict):
 async def ping_health():
     while True:
         try:
-            response = requests.get("http://localhost:8000/health")
+            # Use the full external URL instead of localhost
+            response = requests.get("https://one-see.onrender.com/health")
             print(f"Health ping response: {response.status_code}")
         except Exception as e:
             print(f"Error pinging health: {e}")
-        await asyncio.sleep(300)  # Sleep for 13 minutes (780 seconds)
+        await asyncio.sleep(120)  # Sleep for 13 minutes (780 seconds)
+
 
 # Start the pinging in the background
 @app.on_event("startup")
@@ -280,6 +282,7 @@ async def start_ping_task():
 
 # Start the scheduler to ping the health endpoint every 13 minutes periodically
 scheduler.start()    
+
 
 
 
