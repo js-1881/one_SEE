@@ -16,9 +16,11 @@ from openpyxl import load_workbook
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import threading
 
+scheduler = None
 app = FastAPI()
 
 # Initialize the scheduler
@@ -61,6 +63,84 @@ def is_number(val):
 def health():
     return {"ok": True}
 
+# Health check ping function for self-pinging
+def ping_self():
+    try:
+        # Get the Render external URL from environment variable, or use localhost for development
+        base_url = os.getenv('RENDER_EXTERNAL_URL', 'https://one-see.onrender.com')
+        
+        print(f"🔄 Pinging {base_url}/health at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        response = requests.get(f"{base_url}/health", timeout=30)
+        if response.status_code == 200:
+            print(f"✅ Self-ping successful - Status: {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            print(f"❌ Self-ping failed with status {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    except Exception as e:
+        print(f"❌ Self-ping error: {e} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# Function to start the scheduler
+def start_scheduler():
+    global scheduler
+    if scheduler and scheduler.running:
+        print("✅ Scheduler is already running")
+        return
+    
+    scheduler = BackgroundScheduler(daemon=True)
+    
+    # Add the self-pinging job to run every 2 minutes
+    scheduler.add_job(
+        ping_self,
+        trigger=IntervalTrigger(minutes=3),
+        id='self_ping',
+        name='Self Ping Job',
+        replace_existing=True
+    )
+    
+    try:
+        scheduler.start()
+        print("🚀 Self-pinging scheduler STARTED - Will ping every 3 minutes")
+        print("⏰ Next ping in 3 minutes...")
+        
+        # Do an immediate ping on startup
+        print("🔄 Initial ping...")
+        ping_self()
+        
+    except Exception as e:
+        print(f"❌ Failed to start scheduler: {e}")
+
+# Start the scheduler when the app starts
+@app.on_event("startup")
+async def startup_event():
+    print("🔧 Starting up application...")
+    
+    # Start scheduler in a separate thread to avoid blocking
+    scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
+    scheduler_thread.start()
+    
+    # Give it a moment to start
+    time.sleep(2)
+    print("🏁 Application startup complete")
+
+# Add a route to check scheduler status
+@app.get("/scheduler-status")
+async def scheduler_status():
+    global scheduler
+    if scheduler and scheduler.running:
+        jobs = scheduler.get_jobs()
+        return {
+            "status": "running",
+            "job_count": len(jobs),
+            "next_ping": str(jobs[0].next_run_time) if jobs else "No jobs"
+        }
+    else:
+        return {"status": "not running"}
+
+# Add a route to manually trigger a ping
+@app.get("/trigger-ping")
+async def trigger_ping():
+    ping_self()
+    return {"message": "Manual ping triggered"}
 
 valid_ids = []
 
@@ -281,6 +361,7 @@ async def start_ping_task():
 
 # Start the scheduler to periodically ping health endpoint
 scheduler.start()
+
 
 
 
