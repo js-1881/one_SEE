@@ -267,7 +267,7 @@ async def ping_health():
     while True:
         try:
             # Use the full external URL (replace with your actual domain if needed)
-            response = requests.get("https://your-app-name.onrender.com/health")
+            response = requests.get("https://one-see.onrender.com/health")
             print(f"Health ping response: {response.status_code}")
         except Exception as e:
             print(f"Error pinging health: {e}")
@@ -281,6 +281,7 @@ async def start_ping_task():
 
 # Start the scheduler to periodically ping health endpoint every 2 minutes
 scheduler.start()
+
 
 
 
