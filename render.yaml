@@ -1,9 +1,11 @@
 services: 
-- type: web 
-name: fastapi-file-processor 
-env: python 
-plan: free 
-buildCommand: pip install -r requirements.txt 
-startCommand: uvicorn one_SEE_render:app --host 0.0.0.0 --port $PORT 
-envVars: - key: PORT value: "10000"
+  - type: web 
+    name: fastapi-file-processor 
+    env: python 
+    plan: free 
+    buildCommand: pip install -r requirements.txt 
+    startCommand: uvicorn one_SEE_render:app --host 0.0.0.0 --port $PORT
+
+#envVars: - key: PORT value: "10000"
+
 
