@@ -8,3 +8,4 @@ thefuzz
 psutil
 python-Levenshtein
 python-multipart
+apscheduler
