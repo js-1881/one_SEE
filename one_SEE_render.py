@@ -23,8 +23,6 @@ import threading
 scheduler = None
 app = FastAPI()
 
-# Initialize the scheduler
-scheduler = AsyncIOScheduler()
 
 @app.get("/")
 async def root():
@@ -340,6 +338,7 @@ async def process_message(message: dict):
 
     data = final_weighted_blindleister.to_dict(orient='records')
     return {"data": data}
+
 
 
 
