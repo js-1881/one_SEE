@@ -89,7 +89,7 @@ def start_scheduler():
     # Add the self-pinging job to run every 2 minutes
     scheduler.add_job(
         ping_self,
-        trigger=IntervalTrigger(minutes=3),
+        trigger=IntervalTrigger(minutes=11),
         id='self_ping',
         name='Self Ping Job',
         replace_existing=True
@@ -338,6 +338,7 @@ async def process_message(message: dict):
 
     data = final_weighted_blindleister.to_dict(orient='records')
     return {"data": data}
+
 
 
 
