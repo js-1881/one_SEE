@@ -86,7 +86,7 @@ def start_scheduler():
     
     scheduler = BackgroundScheduler(daemon=True)
     
-    # Add the self-pinging job to run every 2 minutes
+    # Add the self-pinging job to run every 11 minutes
     scheduler.add_job(
         ping_self,
         trigger=IntervalTrigger(minutes=11),
@@ -97,8 +97,8 @@ def start_scheduler():
     
     try:
         scheduler.start()
-        print("🚀 Self-pinging scheduler STARTED - Will ping every 3 minutes")
-        print("⏰ Next ping in 3 minutes...")
+        print("🚀 Self-pinging scheduler STARTED - Will ping every 11 minutes")
+        print("⏰ Next ping in 11 minutes...")
         
         # Do an immediate ping on startup
         print("🔄 Initial ping...")
@@ -338,6 +338,7 @@ async def process_message(message: dict):
 
     data = final_weighted_blindleister.to_dict(orient='records')
     return {"data": data}
+
 
 
 
