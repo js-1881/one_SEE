@@ -199,7 +199,7 @@ async def process_message(message: dict):
     # Fetch blindleister price
     print("🍚🍚")
     # === Years to fetch ===
-    years = [2021, 2023, 2024]
+    years = [2021, 2023, 2024, 2025]
     records = []
 
     # === Loop through each ID and fetch data for each year ===
@@ -310,12 +310,13 @@ async def process_message(message: dict):
     weighted_years_pivot = weighted_years_pivot.rename(columns={
         2021: 'weighted_2021_eur_mwh_blindleister',
         2023: 'weighted_2023_eur_mwh_blindleister',
-        2024: 'weighted_2024_eur_mwh_blindleister'
+        2024: 'weighted_2024_eur_mwh_blindleister',
+        2025: 'weighted_2025_eur_mwh_blindleister'
     })
 
     # Add a column to average the available yearly weighted values
     weighted_years_pivot['average_weighted_eur_mwh_blindleister'] = weighted_years_pivot[
-        ['weighted_2021_eur_mwh_blindleister', 'weighted_2023_eur_mwh_blindleister', 'weighted_2024_eur_mwh_blindleister']
+        ['weighted_2021_eur_mwh_blindleister', 'weighted_2023_eur_mwh_blindleister', 'weighted_2024_eur_mwh_blindleister', 'weighted_2025_eur_mwh_blindleister']
     ].mean(axis=1, skipna=True)
 
     # Show only the desired columns
@@ -324,7 +325,7 @@ async def process_message(message: dict):
         'weighted_2021_eur_mwh_blindleister',
         'weighted_2023_eur_mwh_blindleister',
         'weighted_2024_eur_mwh_blindleister',
-        #'average_weighted_eur_mwh_blindleister_avg'
+        'weighted_2025_eur_mwh_blindleister',
     ]]
     
     
@@ -339,6 +340,7 @@ async def process_message(message: dict):
 
     data = final_weighted_blindleister.to_dict(orient='records')
     return {"data": data}
+
 
 
 
