@@ -1,238 +1,159 @@
-import requests 
+import requests
 import pandas as pd
 import numpy as np
-import json
 import os
-import re
-from thefuzz import fuzz, process
-import time
-from io import StringIO
-import psutil
 import gc
-import openpyxl
-import pytz
-from openpyxl import load_workbook
+import time
+import psutil
+import threading
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-import threading
+
+# =============================================================================
+# CONFIGURATION – read from Render environment variables
+# =============================================================================
+
+BLINDLEISTER_EMAIL = os.getenv("BLINDLEISTER_EMAIL", "").strip()
+BLINDLEISTER_PASSWORD = os.getenv("BLINDLEISTER_PASSWORD", "").strip()
+BLINDLEISTER_HARDCODED_TOKEN = os.getenv("BLINDLEISTER_HARDCODED_TOKEN", "").strip()
+
+_BASE_URL = "https://api.blindleister.de"
+_AUTH_URL = f"{_BASE_URL}/api/v1/authentication/get-access-token"
+_MARKET_PRICE_URL = f"{_BASE_URL}/api/v1/market-price-atlas-api/get-market-price"
+
+YEARS = [2021, 2023, 2024, 2025]
 
 scheduler = None
 app = FastAPI()
 
+# Module-level token cache for freshly fetched tokens
+_fresh_token: str | None = None
 
-@app.get("/")
-async def root():
-    return {
-        "status": "ok",
-        "message": "n8n-Python service is running (SEE fetcher). Send your message to /process"
-    }
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
 
 def check_memory_usage():
-    process = psutil.Process(os.getpid()) 
-    memory_info = process.memory_info()  
-    return memory_info.rss / 1024 ** 2  
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024**2
+
 
 def ram_check():
     print("memory usage:", check_memory_usage(), "MB")
 
-def convert_date_or_keep_string(date):
-    try:
-        # Try to convert to datetime, assuming day-first format
-        date_obj = pd.to_datetime(date, dayfirst=True, errors='raise')
-        # If successful, format as 'yyyy-mm-dd'
-        return date_obj.strftime('%Y-%m-%d')
-    except ValueError:
-        # If it's not a valid date, return it as is (non-date string)
-        return date
-    
-def is_number(val):
-    try:
-        float(val)
-        return True
-    except (ValueError, TypeError):
-        return False
+
+# =============================================================================
+# BLINDLEISTER AUTH  (mirrors upgrid_pricing_template.py pattern)
+# =============================================================================
 
 
-@app.get("/health", include_in_schema=False)
-def health():
-    return {"ok": True}
-
-# Health check ping function for self-pinging
-def ping_self():
-    try:
-        # Get the Render external URL from environment variable, or use localhost for development
-        base_url = os.getenv('RENDER_EXTERNAL_URL', 'https://one-see.onrender.com')
-        
-        print(f"🔄 Pinging {base_url}/health at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        response = requests.get(f"{base_url}/health", timeout=30)
-        if response.status_code == 200:
-            print(f"✅ Self-ping successful - Status: {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        else:
-            print(f"❌ Self-ping failed with status {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    except Exception as e:
-        print(f"❌ Self-ping error: {e} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-# Function to start the scheduler
-def start_scheduler():
-    global scheduler
-    if scheduler and scheduler.running:
-        print("✅ Scheduler is already running")
-        return
-    
-    scheduler = BackgroundScheduler(daemon=True)
-
-    # Add the self-pinging job to run every 8 minutes
-    scheduler.add_job(
-        ping_self,
-        trigger=IntervalTrigger(minutes=8),
-        id='self_ping',
-        name='Self Ping Job',
-        replace_existing=True
+def _fetch_fresh_token() -> str:
+    """Fetch a new Bearer token via email/password login."""
+    global _fresh_token
+    resp = requests.post(
+        _AUTH_URL,
+        headers={"accept": "text/plain", "Content-Type": "application/json"},
+        json={"email": BLINDLEISTER_EMAIL, "password": BLINDLEISTER_PASSWORD},
     )
-    
-    try:
-        scheduler.start()
-        print("🚀 Self-pinging scheduler STARTED - Will ping every 8 minutes")
-        print("⏰ Next ping in 8 minutes...")
-        
-        # Do an immediate ping on startup
-        print("🔄 Initial ping...")
-        ping_self()
-        
-    except Exception as e:
-        print(f"❌ Failed to start scheduler: {e}")
-
-# Start the scheduler when the app starts
-@app.on_event("startup")
-async def startup_event():
-    print("🔧 Starting up application...")
-    
-    # Start scheduler in a separate thread to avoid blocking
-    scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
-    scheduler_thread.start()
-    
-    # Give it a moment to start
-    time.sleep(2)
-    #scheduler_thread.join()  # Wait for the thread to ensure it has started
-    print("🏁 Application startup complete")
-
-# Add a route to check scheduler status
-@app.get("/scheduler-status")
-async def scheduler_status():
-    global scheduler
-    if scheduler and scheduler.running:
-        jobs = scheduler.get_jobs()
-        return {
-            "status": "running",
-            "job_count": len(jobs),
-            "next_ping": str(jobs[0].next_run_time) if jobs else "No jobs"
-        }
-    else:
-        return {"status": "not running"}
-
-# Add a route to manually trigger a ping
-@app.get("/trigger-ping")
-async def trigger_ping():
-    ping_self()
-    return {"message": "Manual ping triggered"}
-
-valid_ids = []
-
-# Endpoint to process the message text (from Slack)
-@app.post("/process")
-async def process_message(message: dict):
-    # Extract text from the Slack message
-    slack_text = message.get("text", "")
-
-    # Initialize valid_ids list within the function
-    valid_ids.clear()  # Clear the list to avoid accumulation from previous calls
-
-    # Extract valid "SEE" IDs from the Slack message
-    for word in slack_text.split():
-        # Check if the word starts with 'SEE' (case-insensitive)
-        if word.strip().lower().startswith("see"):
-            valid_ids.append(word.strip().upper())  # Add to valid_ids (in uppercase)
-
-    # Get unique 'SEE' IDs and count them
-    unique_see = list(set(valid_ids))  # Remove duplicates by converting to set, then back to list
-    count = len(unique_see)
-
-    # Perform a RAM check (optional)
-    ram_check()
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to get Blindleister token: {resp.status_code} - {resp.text}"
+        )
+    _fresh_token = resp.text.strip('"')
+    print("✅ Fresh Blindleister token obtained")
+    return _fresh_token
 
 
-    # Step 1: Get access token
+def get_blindleister_token(force_refresh: bool = False) -> str:
+    """
+    Return an auth token:
+    1. Hardcoded token (from env) if set and not forcing refresh
+    2. Cached fresh token if available
+    3. Freshly fetched token
+    """
+    global _fresh_token
+    if BLINDLEISTER_HARDCODED_TOKEN and not force_refresh:
+        return BLINDLEISTER_HARDCODED_TOKEN
+    if _fresh_token and not force_refresh:
+        return _fresh_token
+    return _fetch_fresh_token()
+
+
+# =============================================================================
+# BLINDLEISTER DATA FETCH
+# =============================================================================
+
+
+def fetch_blindleister_records(site_ids: list, years: list = YEARS) -> list:
+    """
+    Fetch raw market-price records from Blindleister for each site × year.
+    Handles 401 by automatically refreshing the token once.
+    """
+    auth_token = get_blindleister_token()
     headers = {
-        'accept': 'text/plain',
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {auth_token}",
     }
 
-
-    json_data = {
-        'email': 'lfritsch@flex-power.energy',
-        'password': 'Ceciistlieb123.',
-    }
-
-    response = requests.post('https://api.blindleister.de/api/v1/authentication/get-access-token', headers=headers, json=json_data)
-
-    if response.status_code != 200:
-        print("Failed to get access token:", response.status_code, response.text)
-        exit()
-
-    token = response.text.strip('"')  # Remove potential extra quotes
-    print("Access token:", token)
-
-
-    # Step 2: Use the token to query market price
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvcHNAZmxleC1wb3dlci5lbmVyZ3kifQ.Q1cDDds4fzzYFbW59UuZ4362FnmvBUQ8FY4UNhWp2a0'
-    }
-
-
-    # blindleister price
-    # Fetch blindleister price
-    print("🍚🍚")
-    # === Years to fetch ===
-    years = [2021, 2023, 2024, 2025]
     records = []
+    token_refreshed = False
 
-    # === Loop through each ID and fetch data for each year ===
-    for site_id in valid_ids:
+    for site_id in site_ids:
         print(f"Processing: {site_id}")
 
         for year in years:
-            payload = {
-                'ids': [site_id],
-                'year': year
-            }
+            payload = {"ids": [site_id], "year": year}
+            resp = requests.post(_MARKET_PRICE_URL, headers=headers, json=payload)
 
-            response = requests.post(
-                'https://api.blindleister.de/api/v1/market-price-atlas-api/get-market-price', # market price atlas blindleister API
-                headers = headers,
-                json=payload
-            )
+            # Refresh token once on 401
+            if resp.status_code == 401 and not token_refreshed:
+                print("⚠️ Token expired/invalid – fetching fresh token and retrying...")
+                auth_token = get_blindleister_token(force_refresh=True)
+                headers["Authorization"] = f"Bearer {auth_token}"
+                token_refreshed = True
+                resp = requests.post(_MARKET_PRICE_URL, headers=headers, json=payload)
 
-            if response.status_code != 200:
-                print(f"  Year {year}: Failed ({response.status_code}) - {response.text}")
+            if resp.status_code != 200:
+                print(f"  Year {year}: Failed ({resp.status_code}) - {resp.text}")
                 continue
 
             try:
-                result = response.json()
+                result = resp.json()
                 for entry in result:
-                    entry['year'] = year
+                    entry["year"] = year
                     records.append(entry)
             except Exception as e:
                 print(f"  Year {year}: Error parsing response - {e}")
-                continue
 
-    df_flat = pd.DataFrame(records)
-    df_flat = pd.json_normalize(
+    return records
+
+
+# =============================================================================
+# DATA PROCESSING
+# =============================================================================
+
+
+def process_blindleister_records(records: list) -> pd.DataFrame:
+    """
+    Transform raw Blindleister API records into a summary DataFrame.
+
+    Output columns per unit_mastr_id:
+    - weighted_2021/2023/2024/2025_eur_mwh_blindleister  (yearly weighted RMV delta)
+    - average_weighted_eur_mwh_blindleister               (production-weighted overall)
+    - energy_source
+    - adjusted_pv, adjusted_pv_low, adjusted_pv_high      (Adjusted_PV = -1.9 + 1.3*blind ± 1.6)
+    - adjusted_wind, adjusted_wind_low, adjusted_wind_high (Adjusted_WIND = -2 + 1.1*blind ± 2.7)
+    """
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.json_normalize(
         records,
         record_path="months",
         meta=[
@@ -243,10 +164,10 @@ async def process_message(message: dict):
             "annual_generated_energy_mwh",
             "benchmark_market_price_eur_mwh",
         ],
-        errors="ignore"  # in case some records lack "months"
+        errors="ignore",
     )
 
-    cols = [
+    keep_cols = [
         "year",
         "unit_mastr_id",
         "gross_power_kw",
@@ -259,103 +180,256 @@ async def process_message(message: dict):
         "monthly_market_price_eur_mwh",
         "monthly_reference_market_price_eur_mwh",
     ]
-
-    df_flat = df_flat[cols]
-    df_all_flat = df_flat.copy()
+    df = df[[c for c in keep_cols if c in df.columns]].copy()
 
     print("🥨🥨🥨🥨🥨🥨")
-    
-    del df_flat
-    gc.collect()
 
-    df_all_flat['weighted_per_mwh_monthly'] = (
-        ((df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_market_price_eur_mwh']) -
-            (df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_reference_market_price_eur_mwh'])) /
-        df_all_flat['monthly_generated_energy_mwh'] *
-        df_all_flat['monthly_energy_contribution_percent'] / 100 * 12
+    # Monthly spot-RMV delta (EUR)
+    df["spot_rmv_EUR_monthly"] = (
+        df["monthly_generated_energy_mwh"] * df["monthly_market_price_eur_mwh"]
+        - df["monthly_generated_energy_mwh"]
+        * df["monthly_reference_market_price_eur_mwh"]
     )
 
-    df_all_flat['spot_rmv_EUR_ytd'] = (
-    ((df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_market_price_eur_mwh']) -
-        (df_all_flat['monthly_generated_energy_mwh'] * df_all_flat['monthly_reference_market_price_eur_mwh']))
+    # Monthly weighted value per MWh (annualised, contribution-weighted)
+    df["weighted_per_mwh_monthly"] = (
+        df["spot_rmv_EUR_monthly"]
+        / df["monthly_generated_energy_mwh"]
+        * df["monthly_energy_contribution_percent"]
+        / 100
+        * 12
     )
-    
-    permalo_blind = df_all_flat.groupby(['unit_mastr_id'], dropna=False).agg(
-                        spot_rmv_EUR_ytd = ('spot_rmv_EUR_ytd','sum'),
-                        sum_prod_ytd = ('monthly_generated_energy_mwh','sum')
-                    ).reset_index()
 
-    permalo_blind['average_weighted_eur_mwh_blindleister'] = permalo_blind['spot_rmv_EUR_ytd'] / permalo_blind['sum_prod_ytd']
-    
+    # --- Overall production-weighted average across all years ---
+    permalo_blind = (
+        df.groupby("unit_mastr_id", dropna=False)
+        .agg(
+            spot_rmv_EUR_ytd=("spot_rmv_EUR_monthly", "sum"),
+            sum_prod_ytd=("monthly_generated_energy_mwh", "sum"),
+        )
+        .reset_index()
+    )
+    permalo_blind["average_weighted_eur_mwh_blindleister"] = (
+        permalo_blind["spot_rmv_EUR_ytd"] / permalo_blind["sum_prod_ytd"]
+    )
+
     print("🥨🥨🥨")
     ram_check()
 
-    year_agg_per_unit = df_all_flat.groupby(['year', 'unit_mastr_id'])['weighted_per_mwh_monthly'].mean().reset_index(name='weighted_year_agg_per_unit_eur_mwh')
+    # --- Yearly weighted values (mean of monthly contribution-weighted values) ---
+    year_agg = (
+        df.groupby(["year", "unit_mastr_id"])["weighted_per_mwh_monthly"]
+        .mean()
+        .reset_index(name="weighted_year_agg_per_unit_eur_mwh")
+    )
 
-
-    df_year_agg_per_unit = pd.DataFrame(year_agg_per_unit)
-
-    weighted_years_pivot = df_year_agg_per_unit.pivot(
-        index='unit_mastr_id',
-        columns='year',
-        values='weighted_year_agg_per_unit_eur_mwh'
+    weighted_years_pivot = year_agg.pivot(
+        index="unit_mastr_id",
+        columns="year",
+        values="weighted_year_agg_per_unit_eur_mwh",
     ).reset_index()
 
-    del df_year_agg_per_unit, year_agg_per_unit
+    del year_agg
     gc.collect()
 
-
-    # Rename columns for clarity
-    weighted_years_pivot.columns.name = None  # remove the axis name
-    weighted_years_pivot = weighted_years_pivot.rename(columns={
-        2021: 'weighted_2021_eur_mwh_blindleister',
-        2023: 'weighted_2023_eur_mwh_blindleister',
-        2024: 'weighted_2024_eur_mwh_blindleister',
-        2025: 'weighted_2025_eur_mwh_blindleister'
-    })
-
-    # Add a column to average the available yearly weighted values
-    weighted_years_pivot['average_weighted_eur_mwh_blindleister'] = weighted_years_pivot[
-        ['weighted_2021_eur_mwh_blindleister', 'weighted_2023_eur_mwh_blindleister', 'weighted_2024_eur_mwh_blindleister', 'weighted_2025_eur_mwh_blindleister']
-    ].mean(axis=1, skipna=True)
-
-    # Show only the desired columns
-    final_weighted_blindleister = weighted_years_pivot[[
-        'unit_mastr_id',
-        'weighted_2021_eur_mwh_blindleister',
-        'weighted_2023_eur_mwh_blindleister',
-        'weighted_2024_eur_mwh_blindleister',
-        'weighted_2025_eur_mwh_blindleister',
-    ]]
-    
-    
-    final_weighted_blindleister = pd.merge(
-        final_weighted_blindleister, 
-        permalo_blind[["unit_mastr_id", "average_weighted_eur_mwh_blindleister"]],
-        on= 'unit_mastr_id',
-        how='left'
+    weighted_years_pivot.columns.name = None
+    weighted_years_pivot = weighted_years_pivot.rename(
+        columns={
+            2021: "weighted_2021_eur_mwh_blindleister",
+            2023: "weighted_2023_eur_mwh_blindleister",
+            2024: "weighted_2024_eur_mwh_blindleister",
+            2025: "weighted_2025_eur_mwh_blindleister",
+        }
     )
-    
-    print(final_weighted_blindleister)
 
-    data = final_weighted_blindleister.to_dict(orient='records')
-    return {"data": data}
+    # --- Build final table ---
+    year_cols = [
+        "weighted_2021_eur_mwh_blindleister",
+        "weighted_2023_eur_mwh_blindleister",
+        "weighted_2024_eur_mwh_blindleister",
+        "weighted_2025_eur_mwh_blindleister",
+    ]
+    pivot_cols = ["unit_mastr_id"] + [
+        c for c in year_cols if c in weighted_years_pivot.columns
+    ]
+    final = weighted_years_pivot[pivot_cols].copy()
+
+    # Merge overall average (production-weighted)
+    final = pd.merge(
+        final,
+        permalo_blind[["unit_mastr_id", "average_weighted_eur_mwh_blindleister"]],
+        on="unit_mastr_id",
+        how="left",
+    )
+
+    # Merge energy_source (first observed value per unit)
+    energy_map = df.groupby("unit_mastr_id")["energy_source"].first().reset_index()
+    final = pd.merge(final, energy_map, on="unit_mastr_id", how="left")
+
+    # Round EUR/MWh columns
+    eur_cols = [c for c in final.columns if "eur_mwh" in str(c).lower()]
+    final[eur_cols] = final[eur_cols].round(2)
+
+    # --- Adjusted price columns ---
+    blind = final["average_weighted_eur_mwh_blindleister"]
+
+    # Adjusted_PV = -1.9 + 1.3 * blind ± 1.6
+    final["adjusted_pv"] = (-1.9 + 1.3 * blind).round(2)
+    final["adjusted_pv_low"] = (final["adjusted_pv"] - 1.6).round(2)
+    final["adjusted_pv_high"] = (final["adjusted_pv"] + 1.6).round(2)
+
+    # Adjusted_WIND = -2 + 1.1 * blind ± 2.7
+    final["adjusted_wind"] = (-2 + 1.1 * blind).round(2)
+    final["adjusted_wind_low"] = (final["adjusted_wind"] - 2.7).round(2)
+    final["adjusted_wind_high"] = (final["adjusted_wind"] + 2.7).round(2)
+
+    # Unified adjusted column based on energy_source
+    src = final["energy_source"].astype(str)
+    is_pv = src.str.contains(r"PV|solar", case=False, regex=True, na=False)
+    is_wind = src.str.contains(r"wind", case=False, regex=True, na=False)
+
+    final["adjusted"] = np.where(
+        is_pv, final["adjusted_pv"], np.where(is_wind, final["adjusted_wind"], np.nan)
+    )
+    final["adjusted_low"] = np.where(
+        is_pv,
+        final["adjusted_pv_low"],
+        np.where(is_wind, final["adjusted_wind_low"], np.nan),
+    )
+    final["adjusted_high"] = np.where(
+        is_pv,
+        final["adjusted_pv_high"],
+        np.where(is_wind, final["adjusted_wind_high"], np.nan),
+    )
+
+    return final
 
 
+# =============================================================================
+# FASTAPI ROUTES
+# =============================================================================
 
 
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "n8n-Python service is running (SEE fetcher). Send your message to /process",
+    }
 
 
+@app.get("/health", include_in_schema=False)
+def health():
+    return {"ok": True}
 
 
+# =============================================================================
+# SELF-PING SCHEDULER  (keeps Render free tier alive)
+# =============================================================================
 
 
+def ping_self():
+    try:
+        base_url = os.getenv("RENDER_EXTERNAL_URL", "https://one-see.onrender.com")
+        print(f"🔄 Pinging {base_url}/health at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        response = requests.get(f"{base_url}/health", timeout=30)
+        if response.status_code == 200:
+            print(
+                f"✅ Self-ping successful - Status: {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        else:
+            print(
+                f"❌ Self-ping failed with status {response.status_code} at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+    except Exception as e:
+        print(f"❌ Self-ping error: {e} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
+def start_scheduler():
+    global scheduler
+    if scheduler and scheduler.running:
+        print("✅ Scheduler is already running")
+        return
+
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(
+        ping_self,
+        trigger=IntervalTrigger(minutes=8),
+        id="self_ping",
+        name="Self Ping Job",
+        replace_existing=True,
+    )
+
+    try:
+        scheduler.start()
+        print("🚀 Self-pinging scheduler STARTED - Will ping every 8 minutes")
+        print("⏰ Next ping in 8 minutes...")
+        print("🔄 Initial ping...")
+        ping_self()
+    except Exception as e:
+        print(f"❌ Failed to start scheduler: {e}")
 
 
+@app.on_event("startup")
+async def startup_event():
+    print("🔧 Starting up application...")
+    scheduler_thread = threading.Thread(target=start_scheduler, daemon=True)
+    scheduler_thread.start()
+    time.sleep(2)
+    print("🏁 Application startup complete")
 
 
+@app.get("/scheduler-status")
+async def scheduler_status():
+    global scheduler
+    if scheduler and scheduler.running:
+        jobs = scheduler.get_jobs()
+        return {
+            "status": "running",
+            "job_count": len(jobs),
+            "next_ping": str(jobs[0].next_run_time) if jobs else "No jobs",
+        }
+    return {"status": "not running"}
 
 
+@app.get("/trigger-ping")
+async def trigger_ping():
+    ping_self()
+    return {"message": "Manual ping triggered"}
 
+
+# =============================================================================
+# MAIN PROCESS ENDPOINT
+# =============================================================================
+
+
+@app.post("/process")
+async def process_message(message: dict):
+    slack_text = message.get("text", "")
+
+    # Extract SEE IDs from Slack message (local variable – no shared state)
+    valid_ids = []
+    for word in slack_text.split():
+        if word.strip().lower().startswith("see"):
+            valid_ids.append(word.strip().upper())
+
+    unique_see = list(set(valid_ids))
+    print(f"🦐 SEE IDs to process: {unique_see}")
+    ram_check()
+
+    records = fetch_blindleister_records(unique_see)
+
+    if not records:
+        print("❌ No records fetched from Blindleister")
+        return JSONResponse(
+            content={"data": [], "error": "No data fetched from Blindleister"},
+            status_code=200,
+        )
+
+    final = process_blindleister_records(records)
+    gc.collect()
+
+    print(final)
+    ram_check()
+
+    return {"data": final.to_dict(orient="records")}
